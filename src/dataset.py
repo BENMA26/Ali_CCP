@@ -58,217 +58,35 @@ import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from collections import Counter
 
-# ─────────────────────────────────────────────
-# 策略1: 随机负采样 Dataset（离线生成负样本）
-# ─────────────────────────────────────────────
-class AliCCPDatasetWithNegSampling(Dataset):
-    """
-    在加载时为每条正样本随机采样 num_neg 条负样本。
-    负样本 = 对该 user 未曾点击过的 item。
-    """
-    def __init__(
-        self,
+class AliCCPDataset(Dataset):
+    def __init__(self,
         data_path,
         user_sparse_columns,
         user_dense_columns,
         item_sparse_columns,
         item_dense_columns,
-        item_pool_path=None,   # 全量 item 特征表 CSV，若 None 则从数据集自身构建
-        num_neg: int = 4,
-        neg_strategy: str = "random",  # "random" | "popularity"
-        seed: int = 42,
-    ):
-        self.data = pd.read_csv(data_path)
+        ):
         self.user_sparse_columns = user_sparse_columns
-        self.user_dense_columns  = user_dense_columns
+        self.user_dense_columns = user_dense_columns
         self.item_sparse_columns = item_sparse_columns
-        self.item_dense_columns  = item_dense_columns
-        self.num_neg = num_neg
-        self.rng = np.random.default_rng(seed)
-
-        # ── 构建 item 特征池 ──────────────────────────────────
-        if item_pool_path:
-            item_df = pd.read_csv(item_pool_path)
-        else:
-            # 从数据集中去重得到 item 特征池
-            item_df = self.data[item_sparse_columns + item_dense_columns].drop_duplicates()
-
-        self.item_pool = item_df.reset_index(drop=True)
-        self.item_ids  = np.arange(len(self.item_pool))  # 用行索引代表 item id
-
-        # ── 构建 user -> 正样本 item 行索引集合（用于排除）────
-        # 用 item_sparse_columns 拼接字符串作为 item 唯一 key
-        self.data["_item_key"] = (
-            self.data[item_sparse_columns]
-            .astype(str)
-            .agg("_".join, axis=1)
-        )
-        self.item_pool["_item_key"] = (
-            self.item_pool[item_sparse_columns]
-            .astype(str)
-            .agg("_".join, axis=1)
-        )
-        key2idx = dict(zip(self.item_pool["_item_key"], self.item_pool.index))
-        self.data["_item_idx"] = self.data["_item_key"].map(key2idx)
-
-        # user_key -> set of positive item indices
-        user_col = user_sparse_columns[0]  # 用第一个稀疏列作 user id
-        self.user_pos_items: dict = (
-            self.data.groupby(user_col)["_item_idx"]
-            .apply(set)
-            .to_dict()
-        )
-
-        # ── 流行度权重（可选）────────────────────────────────
-        if neg_strategy == "popularity":
-            cnt = Counter(self.data["_item_idx"].tolist())
-            freq = np.array([cnt.get(i, 0) for i in self.item_ids], dtype=np.float64)
-            # 平滑：frequency^0.75（Word2Vec 风格）
-            freq = np.power(freq + 1, 0.75)
-            self.neg_weights = freq / freq.sum()
-        else:
-            self.neg_weights = None  # 均匀采样
-
-        # 只保留正样本行（click=1）
-        self.pos_data = self.data[self.data["click"] == 1].reset_index(drop=True)
+        self.item_dense_columns = item_dense_columns
+        self.df = pd.read_csv(data_path)
+        self.user_sparse_features = self.df[user_sparse_columns]
+        self.user_dense_features = self.df[user_dense_columns]
+        self.item_sparse_features = self.df[item_sparse_columns]
+        self.item_dense_features = self.df[item_dense_columns]
+        self.label = self.df["click"]
 
     def __len__(self):
-        return len(self.pos_data)
+        return len(self.df)
 
-    def _sample_negatives(self, user_key, n):
-        """为 user_key 采 n 个负样本 item 的行索引（排除正样本）"""
-        pos_set = self.user_pos_items.get(user_key, set())
-        candidates = np.setdiff1d(self.item_ids, list(pos_set))
-
-        if len(candidates) == 0:
-            candidates = self.item_ids  # 极端情况退化为全集
-
-        if self.neg_weights is not None:
-            weights = self.neg_weights[candidates]
-            weights = weights / weights.sum()
-        else:
-            weights = None
-
-        chosen = self.rng.choice(candidates, size=n, replace=False, p=weights)
-        return chosen
-
-    def _row_to_item_tensors(self, item_row):
-        sparse = torch.tensor(
-            [item_row[col] for col in self.item_sparse_columns], dtype=torch.long
-        )
-        dense = (
-            torch.tensor([item_row[col] for col in self.item_dense_columns], dtype=torch.float32)
-            if self.item_dense_columns
-            else torch.zeros(0)
-        )
-        return sparse, dense
-
-    def __getitem__(self, idx):
-        row = self.pos_data.iloc[idx]
-        user_key = row[self.user_sparse_columns[0]]
-
-        # ── 用户特征 ────────────────────────────────────────
-        user_sparse = torch.tensor(
-            [row[col] for col in self.user_sparse_columns], dtype=torch.long
-        )
-        user_dense = (
-            torch.tensor([row[col] for col in self.user_dense_columns], dtype=torch.float32)
-            if self.user_dense_columns
-            else torch.zeros(0)
-        )
-
-        # ── 正样本 item ─────────────────────────────────────
-        pos_item_sparse, pos_item_dense = self._row_to_item_tensors(row)
-
-        # ── 负样本 items ────────────────────────────────────
-        neg_idxs = self._sample_negatives(user_key, self.num_neg)
-        neg_sparse_list, neg_dense_list = [], []
-        for nidx in neg_idxs:
-            ns, nd = self._row_to_item_tensors(self.item_pool.iloc[nidx])
-            neg_sparse_list.append(ns)
-            neg_dense_list.append(nd)
-
-        neg_item_sparse = torch.stack(neg_sparse_list)  # (num_neg, num_item_sparse)
-        neg_item_dense  = torch.stack(neg_dense_list)   # (num_neg, num_item_dense)
-
-        return {
-            # 用户侧
-            "user_sparse":      user_sparse,        # (num_user_sparse,)
-            "user_dense":       user_dense,          # (num_user_dense,)
-            # 正样本
-            "pos_item_sparse":  pos_item_sparse,     # (num_item_sparse,)
-            "pos_item_dense":   pos_item_dense,      # (num_item_dense,)
-            # 负样本
-            "neg_item_sparse":  neg_item_sparse,     # (num_neg, num_item_sparse)
-            "neg_item_dense":   neg_item_dense,      # (num_neg, num_item_dense)
-        }
-
-# ─────────────────────────────────────────────
-# 策略2: In-Batch 负采样 Collator（动态，零额外开销）
-# ─────────────────────────────────────────────
-class InBatchNegCollator:
-    """
-    将同一 batch 内其他样本的 item 作为负样本，
-    不需要修改 Dataset，只替换 DataLoader 的 collate_fn。
-    适配原始 AliCCPDataset（只含正负标签，不额外采样）。
-    """
-
-    def __call__(self, batch):
-        # batch: List[dict]，每个 dict 来自 AliCCPDataset.__getitem__
-        keys = batch[0].keys()
-        collated = {k: torch.stack([b[k] for b in batch]) for k in keys}
-
-        B = len(batch)
-        # item_sparse: (B, num_item_sparse)，item_dense: (B, num_item_dense)
-        item_sparse = collated["item_sparse"]  # 正样本 item
-        item_dense  = collated["item_dense"]
-
-        # 构造 In-Batch 负样本矩阵（每个 query 把其他 B-1 条当负样本）
-        # neg_item_sparse: (B, B-1, num_item_sparse)
-        neg_sparse_list, neg_dense_list = [], []
-        for i in range(B):
-            neg_idx = [j for j in range(B) if j != i]
-            neg_sparse_list.append(item_sparse[neg_idx])  # (B-1, F)
-            neg_dense_list.append(item_dense[neg_idx])
-
-        collated["neg_item_sparse"] = torch.stack(neg_sparse_list)  # (B, B-1, F_sparse)
-        collated["neg_item_dense"]  = torch.stack(neg_dense_list)   # (B, B-1, F_dense)
-        return collated
-
-# ─────────────────────────────────────────────
-# 召回双塔损失（BPR + InfoNCE 可选）
-# ─────────────────────────────────────────────
-class RecallLoss(torch.nn.Module):
-    """
-    支持两种损失：
-      - 'bpr'    : sum_neg log σ(s_pos - s_neg)
-      - 'infonce': -log [ exp(s_pos/τ) / (exp(s_pos/τ) + Σ exp(s_neg/τ)) ]
-    """
-
-    def __init__(self, mode: str = "infonce", temperature: float = 0.05):
-        super().__init__()
-        assert mode in ("bpr", "infonce")
-        self.mode = mode
-        self.tau  = temperature
-
-    def forward(self, pos_score: torch.Tensor, neg_scores: torch.Tensor):
-        """
-        pos_score : (B,)
-        neg_scores: (B, num_neg)
-        """
-        if self.mode == "bpr":
-            diff = pos_score.unsqueeze(1) - neg_scores      # (B, num_neg)
-            loss = -torch.log(torch.sigmoid(diff) + 1e-8).mean()
-
-        else:  # infonce
-            pos  = (pos_score / self.tau).unsqueeze(1)      # (B, 1)
-            negs = neg_scores / self.tau                     # (B, num_neg)
-            logits = torch.cat([pos, negs], dim=1)           # (B, 1+num_neg)
-            labels = torch.zeros(logits.size(0), dtype=torch.long, device=logits.device)
-            loss = torch.nn.functional.cross_entropy(logits, labels)
-
-        return loss
-
-
+    def __getitem__(self, index):
+        user_sparse = self.user_sparse_features.iloc[index].values if self.user_sparse_columns else None
+        user_dense = self.user_dense_features.iloc[index].values if self.user_dense_columns else None
+        item_sparse = self.item_sparse_features.iloc[index].values if self.item_sparse_columns else None
+        item_dense = self.item_dense_features.iloc[index].values if self.item_dense_columns else None
+        label = self.label.iloc[index]
+        #return user_sparse, user_dense, item_sparse, item_dense, label
+        return user_sparse, item_sparse, label
 
 
