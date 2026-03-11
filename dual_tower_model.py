@@ -368,37 +368,37 @@ def main(args):
         print("loading training set!")
         train_ds = AliCCPDataset(
             data_path           = args.train_path,
-            user_sparse_columns = USER_SPARSE,
-            user_dense_columns  = USER_DENSE,
-            item_sparse_columns = ITEM_SPARSE,
-            item_dense_columns  = ITEM_DENSE,
+            user_sparse_columns = args.USER_SPARSE,
+            user_dense_columns  = args.USER_DENSE,
+            item_sparse_columns = args.ITEM_SPARSE,
+            item_dense_columns  = args.ITEM_DENSE,
         )
 
         print("loading validation set!")
         val_ds = AliCCPDataset(
             data_path           = args.eval_path,
-            user_sparse_columns = USER_SPARSE,
-            user_dense_columns  = USER_DENSE,
-            item_sparse_columns = ITEM_SPARSE,
-            item_dense_columns  = ITEM_DENSE,
+            user_sparse_columns = args.USER_SPARSE,
+            user_dense_columns  = args.USER_DENSE,
+            item_sparse_columns = args.ITEM_SPARSE,
+            item_dense_columns  = args.ITEM_DENSE,
         )
     else:
         print("loading training set!")
         train_ds = AliCCPPairDataset(
             data_path           = args.train_path,
-            user_sparse_columns = USER_SPARSE,
-            user_dense_columns  = USER_DENSE,
-            item_sparse_columns = ITEM_SPARSE,
-            item_dense_columns  = ITEM_DENSE,
+            user_sparse_columns = args.USER_SPARSE,
+            user_dense_columns  = args.USER_DENSE,
+            item_sparse_columns = args.ITEM_SPARSE,
+            item_dense_columns  = args.ITEM_DENSE,
         )
 
         print("loading validation set!")
         val_ds = AliCCPPairDataset(
             data_path           = args.eval_path,
-            user_sparse_columns = USER_SPARSE,
-            user_dense_columns  = USER_DENSE,
-            item_sparse_columns = ITEM_SPARSE,
-            item_dense_columns  = ITEM_DENSE,
+            user_sparse_columns = args.USER_SPARSE,
+            user_dense_columns  = args.USER_DENSE,
+            item_sparse_columns = args.ITEM_SPARSE,
+            item_dense_columns  = args.ITEM_DENSE,
         )
     
     model = TwoTowerModel(args)
