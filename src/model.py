@@ -56,18 +56,16 @@ class TwoTowerModel(torch.nn.Module):
     def __init__(self, args):
         super(TwoTowerModel, self).__init__()
         
-        user_num        = args.user_num 
-        item_num        = args.item_num 
         embed_dim       = args.embed_dim 
         hidden_dims     = args.hidden_dims 
         tower_out_dim   = args.tower_out_dim 
         dropout         = getattr(args, 'dropout', 0.1)
         
-        self.user_embedders = nn.ModuleList([nn.Embedding(feature_dim, embed_dim, padding_idx=0) for feature_dim in args.user_feature_dims])
-        self.item_embedders = nn.ModuleList([nn.Embedding(feature_dim, embed_dim, padding_idx=0) for feature_dim in args.item_feature_dims])
+        self.user_embedders = nn.ModuleList([nn.Embedding(args.vocabulary_size[feature_idx], embed_dim, padding_idx=0) for feature_idx in args.USER_SPARSE])
+        self.item_embedders = nn.ModuleList([nn.Embedding(args.vocabulary_size[feature_idx], embed_dim, padding_idx=0) for feature_idx in args.ITEM_SPARSE])
         
-        user_input_dim = embed_dim * len(args.user_feature_dims)
-        item_input_dim = embed_dim * len(args.item_feature_dims)
+        user_input_dim = embed_dim * len(args.USER_SPARSE)
+        item_input_dim = embed_dim * len(args.ITEM_SPARSE)
         
         self.user_tower = Tower(user_input_dim, hidden_dims, tower_out_dim, dropout)
         self.item_tower = Tower(item_input_dim, hidden_dims, tower_out_dim, dropout)
@@ -81,9 +79,8 @@ class TwoTowerModel(torch.nn.Module):
         
         user_out = F.normalize(user_out, dim=-1)
         item_out = F.normalize(item_out, dim=-1)
-        scores = (user_out * item_out).sum(dim=-1)  # [B]
         
-        return scores
+        return user_out, item_out
 
     def get_user_embedding(self, user_features):
         user_embed = torch.cat([self.user_embedders[i](user_features[:, i]) for i in range(len(self.user_embedders))], dim=-1)

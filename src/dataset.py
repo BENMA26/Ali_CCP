@@ -65,12 +65,36 @@ class AliCCPDataset(Dataset):
         user_dense_columns,
         item_sparse_columns,
         item_dense_columns,
+        neg_sample_ratio=None,  # 负样本采样比例，例如 4 表示 1:4 (正:负)
         ):
         self.user_sparse_columns = user_sparse_columns
         self.user_dense_columns = user_dense_columns
         self.item_sparse_columns = item_sparse_columns
         self.item_dense_columns = item_dense_columns
-        self.df = pd.read_csv(data_path)
+
+        df = pd.read_csv(data_path)
+
+        # 如果指定了负样本采样比例，进行采样
+        if neg_sample_ratio is not None:
+            positive_df = df[df["click"] == 1]
+            negative_df = df[df["click"] == 0]
+
+            num_positive = len(positive_df)
+            num_negative_to_sample = int(num_positive * neg_sample_ratio)
+
+            # 随机采样负样本
+            if num_negative_to_sample < len(negative_df):
+                negative_sampled = negative_df.sample(n=num_negative_to_sample, random_state=42)
+            else:
+                negative_sampled = negative_df
+
+            # 合并正负样本并打乱
+            self.df = pd.concat([positive_df, negative_sampled], ignore_index=True).sample(frac=1, random_state=42).reset_index(drop=True)
+
+            print(f"[AliCCPDataset] Positive: {num_positive}, Negative sampled: {len(negative_sampled)} (ratio 1:{neg_sample_ratio})")
+        else:
+            self.df = df
+
         self.user_sparse_features = self.df[user_sparse_columns]
         self.user_dense_features = self.df[user_dense_columns]
         self.item_sparse_features = self.df[item_sparse_columns]
@@ -86,7 +110,84 @@ class AliCCPDataset(Dataset):
         item_sparse = self.item_sparse_features.iloc[index].values if self.item_sparse_columns else None
         item_dense = self.item_dense_features.iloc[index].values if self.item_dense_columns else None
         label = self.label.iloc[index]
-        #return user_sparse, user_dense, item_sparse, item_dense, label
-        return user_sparse, item_sparse, label
+
+        # 合并 user 特征
+        user_feature = torch.tensor(np.concatenate([
+            user_sparse if user_sparse is not None else [],
+            user_dense if user_dense is not None else []
+        ]), dtype=torch.long)
+
+        # 合并 item 特征
+        item_feature = torch.tensor(np.concatenate([
+            item_sparse if item_sparse is not None else [],
+            item_dense if item_dense is not None else []
+        ]), dtype=torch.long)
+
+        label = torch.tensor(label, dtype=torch.float)
+
+        return user_feature, item_feature, label
+
+class AliCCPPairDataset(Dataset):
+    def __init__(self,
+        data_path,
+        user_sparse_columns,
+        user_dense_columns,
+        item_sparse_columns,
+        item_dense_columns,
+        ):
+        self.user_sparse_columns = user_sparse_columns
+        self.user_dense_columns = user_dense_columns
+        self.item_sparse_columns = item_sparse_columns
+        self.item_dense_columns = item_dense_columns
+        self.df = pd.read_csv(data_path)
+
+        # 只保留正样本（click=1）
+        self.positive_df = self.df[self.df["click"] == 1].reset_index(drop=True)
+
+        # 提取所有负样本（click=0）的商品特征，用于随机采样
+        self.negative_df = self.df[self.df["click"] == 0].reset_index(drop=True)
+        self.neg_item_sparse = self.negative_df[item_sparse_columns].values
+        self.neg_item_dense = self.negative_df[item_dense_columns].values if item_dense_columns else None
+
+        # 正样本的特征
+        self.user_sparse_features = self.positive_df[user_sparse_columns]
+        self.user_dense_features = self.positive_df[user_dense_columns]
+        self.item_sparse_features = self.positive_df[item_sparse_columns]
+        self.item_dense_features = self.positive_df[item_dense_columns]
+
+    def __len__(self):
+        return len(self.positive_df)
+
+    def __getitem__(self, index):
+        # 获取正样本的用户和商品特征
+        user_sparse = self.user_sparse_features.iloc[index].values if self.user_sparse_columns else None
+        user_dense = self.user_dense_features.iloc[index].values if self.user_dense_columns else None
+        pos_item_sparse = self.item_sparse_features.iloc[index].values if self.item_sparse_columns else None
+        pos_item_dense = self.item_dense_features.iloc[index].values if self.item_dense_columns else None
+
+        # 随机采样一个负样本
+        neg_idx = np.random.randint(0, len(self.neg_item_sparse))
+        neg_item_sparse = self.neg_item_sparse[neg_idx]
+        neg_item_dense = self.neg_item_dense[neg_idx] if self.neg_item_dense is not None else None
+
+        # 合并 user 特征
+        user_feature = torch.tensor(np.concatenate([
+            user_sparse if user_sparse is not None else [],
+            user_dense if user_dense is not None else []
+        ]), dtype=torch.long)
+
+        # 合并正样本 item 特征
+        pos_item_feature = torch.tensor(np.concatenate([
+            pos_item_sparse if pos_item_sparse is not None else [],
+            pos_item_dense if pos_item_dense is not None else []
+        ]), dtype=torch.long)
+
+        # 合并负样本 item 特征
+        neg_item_feature = torch.tensor(np.concatenate([
+            neg_item_sparse if neg_item_sparse is not None else [],
+            neg_item_dense if neg_item_dense is not None else []
+        ]), dtype=torch.long)
+
+        return user_feature, pos_item_feature, neg_item_feature
 
 
